@@ -1,0 +1,4 @@
+dist/
+src/ospool.egg-info/
+src/ospool/_version.py
+venv/
