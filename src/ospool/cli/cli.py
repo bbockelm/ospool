@@ -1,10 +1,14 @@
 
+import collections
+import fnmatch
+
 import click
 import classad
 import htcondor
 
 from ospool import __version__
 import ospool.utils.config as config
+import ospool.utils.query as query
 
 
 @click.group(context_settings=dict(help_option_names=['-h', '--help']))
@@ -37,60 +41,15 @@ class PoolType(click.ParamType):
         return [click.shell_completion.CompletionItem(name) for name in config.get_pool_history() if name.startswith(incomplete)]
 
 
-@click.command()
-@click.option("--output", default="human", help="Output formats")
-@click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.", type=PoolType(), show_default=True)
-@click.option("--factory", default="OSG", help="Name of OSG factory.", show_default=True, type=click.Choice(["OSG", "OSG-ITB"], case_sensitive=False))
-@click.argument("entry", type=EntryType())
-def show_pressure(pool, output, entry, factory):
+def print_human_friendly_entry(entry, entries):
 
-    config.add_pool_history(pool)
-
-    collector = htcondor.Collector(pool)
-    factory_name = f"{entry}@gfactory_instance@{factory}"
-    entries = collector.query(ad_type=htcondor.AdTypes.Any,
-        constraint='MyType =?= "glideresource" && %s =?= GlideFactoryName' % classad.quote(factory_name),
-        projection = [
-            'GlideGroupName',                          # Group name within the frontend
-            'GlideFactoryName',                        # The tuple of (entry name, 'gfactory_instance' (not clear if this is static or not), factory)
-            'GlideClientMonitorGlideinsRunning',       # Pilots running from this group
-            'GlideClientMonitorJobsIdle',              # Idle Jobs in this group matching the entry
-            'GlideClientMonitorJobsRunningHere',       # Jobs in this group running on the entry
-            'GlideClientMonitorGlideinsIdle',          # Glideins that have started - but are not occupied - that were triggered by the group
-            'GlideClientMonitorGlideinsRequestIdle',   # Requested number of glideins idle in the entry for this group.
-            'GlideClientMonitorGlideinsRequestMaxRun', # Requested maximum number of glideins in the entry for this group.
-            'GlideFactoryMonitorRequestedIdle',        # Number of queued and idle glideins the factory is trying to maintain (after applying per-entry limits)
-            'GlideFactoryMonitorRequestedMaxGlideins', # Maximum number of glideins the factory is trying to submit to the entry.
-            'GlideFactoryMonitorStatusIdle',           # Number of idle glideins created by the factory
-            'GlideFactoryMonitorStatusRunning',        # Number of glideins created by the factory reported running by CE.
-            'GlideFactoryMonitorStatusPending',        # Number of idle glideins created by the factory and idle in the CE's queue.
-            'GlideFactoryMonitorStatusHeld',           # Number of glideins created by the factory and held at the factory.
-            'GLIDEIN_In_Downtime'                      # Whether or not the entry is in downtime.
-            'GlideClientLimitTotalGlideinsPerEntry',   # Set when a limit is hit due to total glideins per entry.
-            'GlideClientLimitIdleGlideinsPerEntry',    # Set when a limit is hit due to idle glideins.
-            'GlideClientLimitTotalGlideinsPerGroup',   # Set when a limit is hit due to total glideins in the group
-            'GlideClientLimitIdleGlideinsPerGroup',    # Set when a limit is hit due to idle glideins in the group
-            'GlideClientLimitTotalGlideinsPerFrontend',# Set when a limit is hit due to total glideins in the frontend
-            'GlideClientLimitIdleGlideinsPerFrontend', # Set when a limit is hit due to idle glideins in the frontend
-            'GlideClientLimitTotalGlideinsGlobal',     # Set when a limit is hit due to total glideins in the pool
-            'GlideClientLimitIdleGlideinsGlobal',      # Set when a limit is hit due to total glideins in the pool
-            'GlideFactoryMonitorStatus_GlideFactoryLimitTotalGlideinsPerEntry', # Set when a limit is hit at the factory due to per-entry limit
-            'GlideFactoryMonitorStatus_GlideFactoryLimitIdleGlideinsPerEntry',  # Set when a limit is hit at the factory due to per-entry idle limit
-            'GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry',  # Set when a limit is hit at the factory due to per-entry held limit
-            'GLIDEIN_CPUS',                            # Describes the CPU configuration of the entry point.
-            'GLIDEIN_ESTIMATED_CPUS',                  # If CPUs is set to 'auto' (whole nodes), an estimate of the number of cores per glidein
-            'GLIDEIN_Gatekeeper',                      # The hostname of the CE.
-            'GLIDEIN_MaxMemMBs',                       # Maximum amount of memory per glidein.
-            'GLIDEIN_ResourceName',                    # The OSG resource name of the CE.
-            'GLIDEIN_Resource_Slots',                  # Slot layouts
-        ]
-    )
-
-    if not entries:
-        print(f"No data found for entry {entry}; does it exist?")
-        return
-
-    click.echo("\nData for entry " + click.style(f"{entry}", bold=True))
+    site_info = []
+    if 'GLIDEIN_ResourceName' in entries[0]:
+        site_info.append(f"Resource name {entries[0]['GLIDEIN_ResourceName']}")
+    if 'GLIDEIN_Gatekeeper' in entries[0]:
+        site_info.append(f"CE hostname {entries[0]['GLIDEIN_Gatekeeper'].split()[0]}")
+    site_info = " (" + ", ".join(site_info) + ")" if site_info else ""
+    click.echo("\nData for entry " + click.style(f"{entry}", bold=True) + site_info)
     if 'GlideClientLimitTotalGlideinsPerEntry' in entries[0]:
         click.echo(click.style("WARNING:", fg='red', bold=True) +
             f" Requests will be reduced due to per-entry limit on total glideins: {entries[0]['GlideClientLimitTotalGlideinsPerEntry']}")
@@ -145,47 +104,69 @@ def show_pressure(pool, output, entry, factory):
         print(f"  - Running at this entry:         {entry['GlideClientMonitorJobsRunningHere']}")
         print(f"- Requests for glideins in the CE:")
         print(f"  - Idle in CE queue:              {entry['GlideClientMonitorGlideinsRequestIdle']}")
-        if entry['GlideClientMonitorGlideinsRequestIdle'] != entry['GlideFactoryMonitorRequestedIdle']:
+        if ('GlideFactoryMonitorRequestedIdle' in entry) and entry['GlideClientMonitorGlideinsRequestIdle'] != entry['GlideFactoryMonitorRequestedIdle']:
             click.echo("    - " + click.style("WARNING", bold=True, fg='red') + f": Factory changed this to {entry['GlideFactoryMonitorRequestedIdle']}")
         print(f"  - Limit:                         {entry['GlideClientMonitorGlideinsRequestMaxRun']}")
-        if entry['GlideClientMonitorGlideinsRequestMaxRun'] != entry['GlideFactoryMonitorRequestedMaxGlideins']:
+        if ('GlideFactoryMonitorRequestedMaxGlideins' in entry) and entry['GlideClientMonitorGlideinsRequestMaxRun'] != entry['GlideFactoryMonitorRequestedMaxGlideins']:
             click.echo("    - " + click.style("WARNING", bold=True, fg='red') + f": Factory changed this to {entry['GlideFactoryMonitorRequestedMaxGlideins']}")
-        print( "- Created glideins for the CE:")
-        print(f"  - Created and idle in factory    {entry['GlideFactoryMonitorStatusIdle']}")
-        print(f"  - Idle in the CE's queue         {entry['GlideFactoryMonitorStatusPending']}")
-        if entry.get("GlideFactoryMonitorStatusHeld", 0):
-            click.echo("  - In an error state (\"held\")     " + click.style(f"{entry['GlideFactoryMonitorStatusHeld']}", fg='red', bold=True))
-        else:
-            print(f"  - In an error state (\"held\")     {entry['GlideFactoryMonitorStatusHeld']}")
-        print(f"  - Reported by CE as running      {entry['GlideFactoryMonitorStatusRunning']}")
+        if 'GlideFactoryMonitorStatusIdle' in entry or 'GlideFactoryMonitorStatusPending' in entry or 'GlideFactoryMonitorStatusRunning' in entry:
+            print( "- Created glideins for the CE:")
+            if 'GlideFactoryMonitorStatusPending' in entry:
+                print(f"  - Created and idle in factory    {entry['GlideFactoryMonitorStatusIdle']}")
+            if 'GlideFactoryMonitorStatusPending' in entry:
+                print(f"  - Idle in the CE's queue         {entry['GlideFactoryMonitorStatusPending']}")
+            if entry.get("GlideFactoryMonitorStatusHeld", 0):
+                click.echo("  - In an error state (\"held\")     " + click.style(f"{entry['GlideFactoryMonitorStatusHeld']}", fg='red', bold=True))
+            elif 'GlideFactoryMonitorStatusHeld' in entry:
+                print(f"  - In an error state (\"held\")     {entry['GlideFactoryMonitorStatusHeld']}")
+            if 'GlideFactoryMonitorStatusRunning' in entry:
+                print(f"  - Reported by CE as running      {entry['GlideFactoryMonitorStatusRunning']}")
         print( "- Running glideins for this group connected to OSPool collector:")
         print(f"  - Slots in collector:            {entry['GlideClientMonitorGlideinsRunning']}")
         print(f"  - Slots without payloads:        {entry['GlideClientMonitorGlideinsIdle']}")
         print()
 
+
+@click.command()
+@click.option("--output", default="human", help="Output formats")
+@click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.", type=PoolType(), show_default=True)
+@click.option("--factory", default="OSG", help="Name of OSG factory.", show_default=True, type=click.Choice(["OSG", "OSG-ITB"], case_sensitive=False))
+@click.option("--resource", help="Show only entries from resources matching glob.")
+@click.option("--ce-hostname", help="Show only entries from CE hostnames matching glob.")
+@click.argument("entry_name", type=EntryType(), required=False)
+def show_pressure(pool, output, entry_name, factory, resource, ce_hostname):
+
+    filter_obj = query.EntryFilter(entry=entry_name, factory=factory, resource=resource, ce_hostname=ce_hostname)
+
+    entry_info = collections.defaultdict(list)
+    has_entry_name = entry_name is None
+    for entry in query.query_entries(pool, filter_obj, query.entry_info_projection):
+        tmp_entry_name = entry['GlideFactoryName'].split("@")[0]
+        if entry_name and fnmatch.fnmatch(tmp_entry_name.lower(), entry_name.lower()):
+            has_entry_name = True
+        entry_info[tmp_entry_name].append(entry)
+
+    if not has_entry_name:
+        print(f"No data found for entry {entry_name}; does it exist?")
+        return
+
+    for key, entries in entry_info.items():
+        print_human_friendly_entry(key, entries)
+
+
 @click.command()
 @click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.", type=PoolType(), show_default=True)
 @click.option("--gpus-only", default=False, help="Only show resources with GPUs.", is_flag=True)
-def list_entries(pool, gpus_only):
+@click.option("--resource", help="Show only entries from resources matching glob.")
+@click.option("--ce-hostname", help="Show only entries from CE hostnames matching glob.")
+@click.option("--factory", default="OSG", help="Name of OSG factory.", show_default=True, type=click.Choice(["OSG", "OSG-ITB"], case_sensitive=False))
+@click.argument("entry_name", type=EntryType(), required=False)
+def list_entries(pool, gpus_only, resource, factory, ce_hostname, entry_name):
 
-    config.add_pool_history(pool)
+    filter_obj = query.EntryFilter(gpus_only=gpus_only, resource=resource, entry=entry_name, factory=factory, ce_hostname=ce_hostname)
 
-    collector = htcondor.Collector(pool)
-    entries = collector.query(ad_type=htcondor.AdTypes.Any,
-                    constraint='MyType =?= "glideresource"',
-                    projection=['GlideFactoryName','GLIDEIN_Resource_Slots'])
     entry_names = set()
-    for entry in entries:
-        if gpus_only:
-            if 'GLIDEIN_Resource_Slots' not in entry:
-                continue
-            has_gpu = False
-            for resource_command in entry['GLIDEIN_Resource_Slots'].split(";"):
-                if resource_command.split(",")[0] == 'GPUs':
-                    has_gpu = True
-                    break
-            if not has_gpu:
-                continue
+    for entry in query.query_entries(pool, filter_obj, []):
         if 'GlideFactoryName' in entry:
             entry_names.add(entry['GlideFactoryName'].split("@")[0])
 
