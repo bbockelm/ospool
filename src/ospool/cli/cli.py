@@ -4,6 +4,7 @@ import classad
 import htcondor
 
 from ospool import __version__
+import ospool.utils.config as config
 
 
 @click.group(context_settings=dict(help_option_names=['-h', '--help']))
@@ -15,10 +16,8 @@ def ospool():
 
 class EntryType(click.ParamType):
 
-    def shell_complete(self, ctx, args, incomplete):
-        print(ctx)
-        print(args)
-        collector = htcondor.Collector("flock.opensciencegrid.org")
+    def shell_complete(self, ctx, param, incomplete):
+        collector = htcondor.Collector(ctx.params['pool'])
         entries = collector.query(ad_type=htcondor.AdTypes.Any,
                         constraint='MyType =?= "glideresource"',
                         projection=['GlideFactoryName'])
@@ -31,12 +30,22 @@ class EntryType(click.ParamType):
         entry_names.sort()
         return [click.shell_completion.CompletionItem(name) for name in entry_names if name.startswith(incomplete)]
 
+
+class PoolType(click.ParamType):
+
+    def shell_complete(self, ctx, param, incomplete):
+        return [click.shell_completion.CompletionItem(name) for name in config.get_pool_history() if name.startswith(incomplete)]
+
+
 @click.command()
 @click.option("--output", default="human", help="Output formats")
-@click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.")
-@click.option("--factory", default="OSG", help="Name of OSG facctory.")
+@click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.", type=PoolType(), show_default=True)
+@click.option("--factory", default="OSG", help="Name of OSG factory.", show_default=True, type=click.Choice(["OSG", "OSG-ITB"], case_sensitive=False))
 @click.argument("entry", type=EntryType())
 def show_pressure(pool, output, entry, factory):
+
+    config.add_pool_history(pool)
+
     collector = htcondor.Collector(pool)
     factory_name = f"{entry}@gfactory_instance@{factory}"
     entries = collector.query(ad_type=htcondor.AdTypes.Any,
@@ -67,7 +76,13 @@ def show_pressure(pool, output, entry, factory):
             'GlideClientLimitIdleGlideinsGlobal',      # Set when a limit is hit due to total glideins in the pool
             'GlideFactoryMonitorStatus_GlideFactoryLimitTotalGlideinsPerEntry', # Set when a limit is hit at the factory due to per-entry limit
             'GlideFactoryMonitorStatus_GlideFactoryLimitIdleGlideinsPerEntry',  # Set when a limit is hit at the factory due to per-entry idle limit
-            'GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry'   # Set when a limit is hit at the factory due to per-entry held limit
+            'GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry',  # Set when a limit is hit at the factory due to per-entry held limit
+            'GLIDEIN_CPUS',                            # Describes the CPU configuration of the entry point.
+            'GLIDEIN_ESTIMATED_CPUS',                  # If CPUs is set to 'auto' (whole nodes), an estimate of the number of cores per glidein
+            'GLIDEIN_Gatekeeper',                      # The hostname of the CE.
+            'GLIDEIN_MaxMemMBs',                       # Maximum amount of memory per glidein.
+            'GLIDEIN_ResourceName',                    # The OSG resource name of the CE.
+            'GLIDEIN_Resource_Slots',                  # Slot layouts
         ]
     )
 
@@ -75,7 +90,42 @@ def show_pressure(pool, output, entry, factory):
         print(f"No data found for entry {entry}; does it exist?")
         return
 
-    click.echo("\nData for entry " + click.style(f"{entry}\n", bold=True))
+    click.echo("\nData for entry " + click.style(f"{entry}", bold=True))
+    if 'GlideClientLimitTotalGlideinsPerEntry' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+            f" Requests will be reduced due to per-entry limit on total glideins: {entries[0]['GlideClientLimitTotalGlideinsPerEntry']}")
+    if 'GlideClientLimitIdleGlideinsPerEntry' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+            f" Requests will be reduced due to per-entry limit on idle glideins: {entries[0]['GlideClientLimitIdleGlideinsPerEntry']}")
+    if 'GlideClientLimitTotalGlideinsPerFrontend' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+            f" Requests will be reduced due to frontend limit on total glideins: {entries[0]['GlideClientLimitTotalGlideinsPerFrontend']}")
+    if 'GlideClientLimitIdleGlideinsPerFrontend' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+            f" Requests will be reduced due to frontend limit on idle glideins: {entries[0]['GlideClientLimitIdleGlideinsPerFrontend']}")
+    if 'GlideClientLimitTotalGlideinsGlobal' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+            f" Requests will be reduced due to pool-wide limit on total glideins: {entries[0]['GlideClientLimitTotalGlideinsGlobal']}")
+    if 'GlideClientLimitIdleGlideinsGlobal' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+            f" Requests will be reduced due to pool-wide limit on idle glideins: {entries[0]['GlideClientLimitIdleGlideinsGlobal']}")
+    if 'GlideFactoryMonitorStatus_GlideFactoryLimitTotalGlideinsPerEntry' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+                f" Requests will be reduced due to factory limit on total entry glideins: {entries[0]['GlideFactoryMonitorStatus_GlideFactoryLimitTotalGlideinsPerEntry']}")
+    if 'GlideFactoryMonitorStatus_GlideFactoryLimitIdleGlideinsPerEntry' in entries[0]:
+        click.echo(click.style("WARNING:", fg='red', bold=True) +
+                f" Requests will be reduced due to factory limit on entry idle glideins: {entries[0]['GlideFactoryMonitorStatus_GlideFactoryLimitIdleGlideinsPerEntry']}")
+    if 'GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry' in entries[0]:
+            click.echo(click.style("WARNING:", fg='red', bold=True) +
+                f" Requests will be reduced due to factory limit on entry held glideins: {entries[0]['GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry']}")
+
+    if 'GLIDEIN_CPUS' in entries[0]:
+        if entries[0]['GLIDEIN_CPUS'] == "auto":
+            print("- Whole node entry " + ("with an estimated {} cores per glidein".format(entries[0]['GLIDEIN_ESTIMATED_CPUS']) if 'GLIDEIN_ESTIMATED_CPUS' in entries[0] else ''))
+        else:
+            print(f"- Entry has {entries[0]['GLIDEIN_CPUS']} cores per glidein")
+
+    print()
 
     if entries[0].get('GLIDEIN_In_Downtime') == 'True':
         click.echo(click.style("WARNING:", fg='red', bold=True) + " Entry point is currently in downtime\n")
@@ -83,39 +133,12 @@ def show_pressure(pool, output, entry, factory):
     for entry in entries:
         click.echo("Data for OSPool group " + click.style(f"{entry['GlideGroupName']}", bold=True))
 
-        if 'GlideClientLimitTotalGlideinsPerEntry' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to per-entry limit on total glideins: {entry['GlideClientLimitTotalGlideinsPerEntry']}")
-        if 'GlideClientLimitIdleGlideinsPerEntry' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to per-entry limit on idle glideins: {entry['GlideClientLimitIdleGlideinsPerEntry']}")
         if 'GlideClientLimitTotalGlideinsPerGroup' in entry:
             click.echo(click.style("WARNING:", fg='red', bold=True) +
                 f" Requests will be reduced due to group limit on total glideins: {entry['GlideClientLimitTotalGlideinsPerGroup']}")
         if 'GlideClientLimitIdleGlideinsPerGroup' in entry:
             click.echo(click.style("WARNING:", fg='red', bold=True) +
                 f" Requests will be reduced due to group limit on idle glideins: {entry['GlideClientLimitIdleGlideinsPerGroup']}")
-        if 'GlideClientLimitTotalGlideinsPerFrontend' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to frontend limit on total glideins: {entry['GlideClientLimitTotalGlideinsPerFrontend']}")
-        if 'GlideClientLimitIdleGlideinsPerFrontend' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to frontend limit on idle glideins: {entry['GlideClientLimitIdleGlideinsPerFrontend']}")
-        if 'GlideClientLimitTotalGlideinsGlobal' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to pool-wide limit on total glideins: {entry['GlideClientLimitTotalGlideinsGlobal']}")
-        if 'GlideClientLimitIdleGlideinsGlobal' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to pool-wide limit on idle glideins: {entry['GlideClientLimitIdleGlideinsGlobal']}")
-        if 'GlideFactoryMonitorStatus_GlideFactoryLimitTotalGlideinsPerEntry' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to factory limit on total entry glideins: {entry['GlideFactoryMonitorStatus_GlideFactoryLimitTotalGlideinsPerEntry']}")
-        if 'GlideFactoryMonitorStatus_GlideFactoryLimitIdleGlideinsPerEntry' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to factory limit on entry idle glideins: {entry['GlideFactoryMonitorStatus_GlideFactoryLimitIdleGlideinsPerEntry']}")
-        if 'GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry' in entry:
-            click.echo(click.style("WARNING:", fg='red', bold=True) +
-                f" Requests will be reduced due to factory limit on entry held glideins: {entry['GlideFactoryMonitorStatus_GlideFactoryLimitHeldGlideinsPerEntry']}")
 
         print( "- Matching payload jobs:")
         print(f"  - Idle:                          {entry['GlideClientMonitorJobsIdle']}")
@@ -141,14 +164,28 @@ def show_pressure(pool, output, entry, factory):
         print()
 
 @click.command()
-@click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.")
-def list_entries(pool):
+@click.option("--pool", default="flock.opensciencegrid.org", help="OSPool collector hostname.", type=PoolType(), show_default=True)
+@click.option("--gpus-only", default=False, help="Only show resources with GPUs.", is_flag=True)
+def list_entries(pool, gpus_only):
+
+    config.add_pool_history(pool)
+
     collector = htcondor.Collector(pool)
     entries = collector.query(ad_type=htcondor.AdTypes.Any,
                     constraint='MyType =?= "glideresource"',
-                    projection=['GlideFactoryName'])
+                    projection=['GlideFactoryName','GLIDEIN_Resource_Slots'])
     entry_names = set()
     for entry in entries:
+        if gpus_only:
+            if 'GLIDEIN_Resource_Slots' not in entry:
+                continue
+            has_gpu = False
+            for resource_command in entry['GLIDEIN_Resource_Slots'].split(";"):
+                if resource_command.split(",")[0] == 'GPUs':
+                    has_gpu = True
+                    break
+            if not has_gpu:
+                continue
         if 'GlideFactoryName' in entry:
             entry_names.add(entry['GlideFactoryName'].split("@")[0])
 

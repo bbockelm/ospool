@@ -1,4 +1,6 @@
 dist/
 src/ospool.egg-info/
 src/ospool/_version.py
+src/ospool/__pycache__
+src/ospool/utils/__pycache__
 venv/
